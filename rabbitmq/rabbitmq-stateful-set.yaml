@@ -1,0 +1,151 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: rabbitmq
+spec:
+  serviceName: rabbitmq
+  replicas: 3
+  selector:
+    matchLabels:
+      app: rabbitmq
+  template:
+    metadata:
+      labels:
+        app: rabbitmq
+    spec:
+      serviceAccountName: rabbitmq
+      terminationGracePeriodSeconds: 10
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: tier
+                    operator: In
+                    values:
+                      - rabbit-node
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                  - key: app
+                    operator: In
+                    values:
+                      - rabbitmq
+              topologyKey: kubernetes.io/hostname
+      initContainers:
+        - name: config
+          image: rabbitmq:4.0.4-management
+          imagePullPolicy: Always
+          command:
+            - bash
+            - -c
+            - |
+              cp /tmp/config/rabbitmq.conf /etc/rabbitmq/rabbitmq.conf && \
+              cp /tmp/config/enabled_plugins /etc/rabbitmq/enabled_plugins && \
+              echo -n "$RABBITMQ_ERLANG_COOKIE" > /var/lib/rabbitmq/.erlang.cookie && \
+              chmod 400 /var/lib/rabbitmq/.erlang.cookie && \
+              chown rabbitmq:rabbitmq /var/lib/rabbitmq/.erlang.cookie && \
+              cat /var/lib/rabbitmq/.erlang.cookie && \
+              ls -la /etc/rabbitmq/
+          env:
+            - name: RABBITMQ_ERLANG_COOKIE
+              valueFrom:
+                secretKeyRef:
+                  name: rabbitmq-cookie
+                  key: RABBITMQ_ERLANG_COOKIE
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/rabbitmq
+              readOnly: false
+            - name: config
+              mountPath: /tmp/config/
+              readOnly: false
+            - name: etc-rabbitmq
+              mountPath: /etc/rabbitmq/
+      containers:
+        - name: rabbitmq-k8s
+          image: rabbitmq:4.0.4-management
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 15672
+              name: management
+            - containerPort: 4369
+              name: discovery
+            - containerPort: 5672
+              name: amqp
+          livenessProbe:
+            httpGet:
+              path: /api/health/checks/alarms
+              port: 15672
+              httpHeaders:
+                - name: Authorization
+                  value: Basic cmFiYml0OnI0YmIxdA==
+            initialDelaySeconds: 60
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /api/health/checks/alarms
+              port: 15672
+              httpHeaders:
+                - name: Authorization
+                  value: Basic cmFiYml0OnI0YmIxdA==
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          env:
+            - name: RABBIT_POD_NAME
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: metadata.name
+            - name: RABBIT_POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: K8S_SERVICE_NAME
+              value: rabbitmq
+            - name: RABBITMQ_NODENAME
+              value: rabbit@$(RABBIT_POD_NAME).$(K8S_SERVICE_NAME).$(RABBIT_POD_NAMESPACE).svc.cluster.local
+            - name: K8S_HOSTNAME_SUFFIX
+              value: .$(K8S_SERVICE_NAME).$(RABBIT_POD_NAMESPACE).svc.cluster.local
+            - name: RABBITMQ_USE_LONGNAME
+              value: "true"
+            - name: RABBITMQ_ERLANG_COOKIE
+              valueFrom:
+                secretKeyRef:
+                  name: rabbitmq-cookie
+                  key: RABBITMQ_ERLANG_COOKIE
+            - name: RABBITMQ_DEFAULT_USER
+              value: rabbit
+            - name: RABBITMQ_DEFAULT_PASS
+              value: r4bb1t
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/rabbitmq
+              readOnly: false
+            - name: etc-rabbitmq
+              mountPath: /etc/rabbitmq/
+      volumes:
+        - name: config-volume
+          configMap:
+            name: rabbitmq-config
+            items:
+              - key: rabbitmq.conf
+                path: rabbitmq.conf
+              - key: enabled_plugins
+                path: enabled_plugins
+        - name: config
+          configMap:
+            name: rabbitmq-config
+            defaultMode: 0755
+        - name: etc-rabbitmq
+          emptyDir: {}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: "standard"
+        resources:
+          requests:
+            storage: 50Mi
